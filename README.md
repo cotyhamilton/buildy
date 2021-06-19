@@ -4,14 +4,14 @@ A container to build container images from git repos.
 
 It uses https://github.com/genuinetools/img as the base image for working with images inside a container.
 
-This project is similar to kaniko, but buildy works with Azure repos while kaniko does not.
+This project is similar to kaniko, but buildy works with Azure Repos while kaniko does not.
 
 ## How to use
 
 ### Docker
 
 ```
-docker run -it \
+docker run -it --rm \
     --security-opt seccomp=unconfined \
     --security-opt apparmor=unconfined \
     cotyhamilton/buildy \
@@ -29,26 +29,47 @@ Instead of passing credentials as args, you may mount a docker config to `/home/
 
 ### Kubernetes
 
-All options
+Example pod
 
 ```
-Usage: buildy [OPTIONS]
+apiVersion: v1
+kind: Pod
+metadata:
+  name: buildy
+  namespace: ci
+spec:
+  containers:
+  - name: buildy
+    image: cotyhamilton/buildy
+    args:
+    - "--git-url=https://github.com/cotyhamilton/buildy.git"
+    - "--git-source-branch=main"
+    - "--namespace=cotyhamilton"
+    - "--image-name=buildy"
+    - "--tags=latest"
+    volumeMounts:
+      - name: regcred
+        mountPath: /home/user/.docker
+    resources:
+      limits:
+        cpu: "1"
+        memory: 512M
+  restartPolicy: Never
+  volumes:
+    - name: regcred
+      secret:
+        secretName: dockerconfig
+        items:
+          - key: .dockerconfigjson
+            path: config.json
+```
 
-OPTIONS:
-  -h, --help                            Prints help information
-      --git-url                         Url for git repo
-      --git-personal-access-token       Optional PAT for authentication with private repo
-      --git-oauth-token                 Optional oauth token for authentication with private repo
-      --git-source-branch               Optional git branch to build from (one source is required)
-      --git-source-commit               Optional git commit id to build from (one source is required)
-      --docker-context                  Optional path to build context relative to repo root
-      --dockerfile                      Optional path to dockerfile relative to repo root
-      --registry                        Optional url of container registry (do not use for dockerhub)
-      --namespace                       Registry namespace
-      --image-name                      Registry repo
-      --tags                            Comma delimited list of tags for push: --tags="1.0.0,latest"
-      --registry-user                   Optional registry username (alternatively mount docker config.json)
-      --registry-password               Optional registry password (alternatively mount docker config.json)
-      --build-args                      Args passsed to build (refer to img docs)
-      --push-args                       Args passed to push (refer to img docs)
+Refer to [img docs](https://github.com/genuinetools/img#running-with-kubernetes) for security
+
+### Options
+
+Run the container to see all options
+
+```
+docker run -it --rm cotyhamilton/buildy
 ```
