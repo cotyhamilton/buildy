@@ -1,0 +1,185 @@
+#!/bin/sh
+set -e
+
+# set default docker context and dockerfile path
+DOCKER_CONTEXT="."
+DOCKERFILE="Dockerfile"
+
+# usage function
+function usage()
+{
+
+    cat << HEREDOC
+
+Usage: buildy [OPTIONS]
+
+OPTIONS:
+  -h, --help                            Prints help information
+      --git-url                         Url for git repo
+      --git-personal-access-token       Optional PAT for authentication with private repo
+      --git-oauth-token                 Optional auth token for authentication with private repo
+      --git-source-branch               Optional git branch to build from (one source is required)
+      --git-source-commit               Optional git commit id to build from (one source is required)
+      --docker-context                  Optional path to build context relative to repo root
+      --dockerfile                      Optional path to dockerfile relative to repo root
+      --registry                        Optional url of container registry (do not use for dockerhub)
+      --namespace                       Registry namespace
+      --image-name                      Registry repo
+      --tags                            Comma delimited list of tags for push: --tags="1.0.0,latest"
+      --registry-user                   Optional registry username (alternatively mount docker config.json)
+      --registry-password               Optional registry password (alternatively mount docker config.json)
+      --build-args                      Args passsed to build (refer to img docs)
+      --push-args                       Args passed to push (refer to img docs)
+
+HEREDOC
+}  
+
+# As long as there is at least one more argument, keep looping
+while [[ $# -gt 0 ]]; do
+    key="$1"
+    case "$key" in
+        -h | --help)
+        usage; exit;
+        ;;
+        # This is an arg=value type option.
+        --git-url=*)
+        # No need to shift here since the value is part of the same string
+        GIT_URL="${key#*=}"
+        ;;
+        --git-personal-access-token=*)
+        GIT_PERSONALACCESSTOKEN="${key#*=}"
+        ;;
+        --git-oauth-token=*)
+        GIT_OAUTHTOKEN="${key#*=}"
+        ;;
+        --git-source-branch=*)
+        GIT_SOURCEBRANCH="${key#*=}"
+        ;;
+        --git-source-commit=*)
+        GIT_SOURCECOMMIT="${key#*=}"
+        ;;
+        --docker-context=*)
+        DOCKER_CONTEXT="${key#*=}"
+        ;;
+        --dockerfile=*)
+        DOCKERFILE="${key#*=}"
+        ;;
+        --registry=*)
+        REGISTRY="${key#*=}"
+        ;;
+        --namespace=*)
+        NAMESPACE="${key#*=}"
+        ;;
+        --image-name=*)
+        IMAGENAME="${key#*=}"
+        ;;
+        --tags=*)
+        TAGS="${key#*=}"
+        ;;
+        --registry-user=*)
+        REGISTRY_USER="${key#*=}"
+        ;;
+        --registry-password=*)
+        REGISTRY_PASSWORD="${key#*=}"
+        ;;
+        --build-args=*)
+        BUILD_ARGS="${key#*=}"
+        ;;
+        --push-args=*)
+        PUSH_ARGS="${key#*=}"
+        ;;
+
+        *)
+        # Do whatever you want with extra options
+        echo "Unknown option '$key'"
+        ;;
+    esac
+    # Shift after checking all the cases to get the next option
+    shift
+done
+
+# error if no git url
+if [ -z "$GIT_URL" ]; then
+  echo 1>&2 "Error: Missing git url"
+  exit 1
+fi
+
+# error if no source reference
+if [ -z "$GIT_SOURCEBRANCH" ] && [ -z "$GIT_SOURCECOMMIT" ]; then
+  echo 1>&2 "Error: No branch or commit id"
+  exit 1
+fi
+
+STATUS=$(curl -Li "$GIT_URL/info/refs?service=git-upload-pack" -o /dev/null -w '%{http_code}\n' -s)
+
+# error if no authentication
+if [ "$STATUS" != "200" ] && [ -z "$GIT_OAUTHTOKEN" ] && [ -z "$GIT_PERSONALACCESSTOKEN" ]; then
+  echo 1>&2 "Error: No authentication provided for private repo"
+  exit 1
+fi
+
+# error if both auth tokens found
+if [ -n "$GIT_OAUTHTOKEN" ] && [ -n "$GIT_PERSONALACCESSTOKEN" ]; then
+  echo 1>&2 "Error: Provide only one method of authentication"
+  exit 1
+fi
+
+# initialize git repo
+git init
+
+git remote add origin ${GIT_URL}
+
+git config http.version HTTP/1.1
+
+# fetch public repo
+if [ "$STATUS" = "200" ]; then
+  git fetch --force --tags --prune --progress --no-recurse-submodules origin +refs/heads/*:refs/remotes/origin/* +refs/pull/*/merge:refs/remotes/pull/*/merge
+fi
+
+# fetch with oauth token
+if [ -n "$GIT_OAUTHTOKEN" ]; then
+  git -c http.extraheader="AUTHORIZATION: bearer ${GIT_CREDENTIAL}" fetch --force --tags --prune --progress --no-recurse-submodules origin +refs/heads/*:refs/remotes/origin/* +refs/pull/*/merge:refs/remotes/pull/*/merge
+fi
+
+# fetch with personal access token
+if [ -n "$GIT_PERSONALACCESSTOKEN" ]; then
+  BASIC_AUTH_CRED=$(printf "%s""pat:$GIT_PERSONALACCESSTOKEN" | base64)
+  git -c http.extraHeader="Authorization: Basic ${BASIC_AUTH_CRED}" fetch --force --tags --prune --progress --no-recurse-submodules origin +refs/heads/*:refs/remotes/origin/* +refs/pull/*/merge:refs/remotes/pull/*/merge
+fi
+
+# checkout source branch
+if [ -n "$GIT_SOURCEBRANCH" ]; then
+  git checkout --progress --force "${GIT_SOURCEBRANCH}"
+fi
+
+# checkout source commit
+if [ -n "$GIT_SOURCECOMMIT" ]; then
+  git checkout --progress --force "${GIT_SOURCECOMMIT}"
+fi
+
+# set destination
+if [ -n "$REGISTRY" ]; then
+  DESTINATION="$REGISTRY/$NAMESPACE/$IMAGENAME"
+else
+  # for dockerhub
+  DESTINATION="$NAMESPACE/$IMAGENAME"
+fi
+
+# build
+echo img build $BUILD_ARGS -f $DOCKERFILE -t $DESTINATION $DOCKER_CONTEXT
+img build $BUILD_ARGS -f $DOCKERFILE -t $DESTINATION $DOCKER_CONTEXT
+
+# login to registry
+if [ -n "$REGISTRY_PASSWORD" ]; then
+  # registry will be blank for dockerhub
+  echo "$REGISTRY_PASSWORD" | img login $REGISTRY --username $REGISTRY_USER --password-stdin
+fi
+
+# tag and push
+for i in $(echo $TAGS | sed "s/,/ /g")
+do
+    echo img tag $DESTINATION $DESTINATION:$i
+    img tag $DESTINATION $DESTINATION:$i
+    echo img push $PUSH_ARGS $DESTINATION:$i
+    img push $PUSH_ARGS $DESTINATION:$i
+done
